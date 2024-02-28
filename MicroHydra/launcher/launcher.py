@@ -1,13 +1,3 @@
-from machine import Pin, SDCard, SPI, RTC, ADC
-import time, os, json, math, ntptime, network
-from lib import keyboard, beeper
-from lib import microhydra as mh
-import machine
-from lib import st7789py as st7789
-from launcher.icons import icons, battery
-from font import vga1_8x16 as fontsmall
-from font import vga2_16x32 as font
-
 
 
 
@@ -49,41 +39,93 @@ Because MicroPython completely resets between apps, the only "wasted" ram from t
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Constants: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-black = const(0)
-white = const(65535)
-default_ui_color = const(53243)
-default_bg_color = const(4421)
-default_ui_sound = const(True)
-default_volume = const(2)
-
-appname_y = const(80) 
-target_vscsad = const(40) # scrolling display "center"
-
-display_width = const(240)
-display_height = const(135)
 
 max_wifi_attemps = const(1000)
 max_ntp_attemps = const(10)
 
+#~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Global: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+# these larger objects are created here to reserve their memory asap
+import gc
+gc.collect()
+
+import network, ntptime
+try:
+    nic = network.WLAN(network.STA_IF)
+except RuntimeError as e:
+    try:
+        nic = network.WLAN(network.STA_IF)
+    except RuntimeError as e:
+        nic = None
+        print("Wifi WLAN object couldnt be created. Gave this error:",e)
+gc.collect()
+
+from lib import beeper
+from lib.mhconfig import Config
+beep = beeper.Beeper()
+config = Config()
+
+from lib import st7789fbuf as st7789
+import machine
+#init driver for the graphics
+tft = st7789.ST7789(
+    machine.SPI(1, baudrate=40000000, sck=machine.Pin(36), mosi=machine.Pin(35), miso=None),
+    135,
+    240,
+    reset=machine.Pin(33, machine.Pin.OUT),
+    cs=machine.Pin(37, machine.Pin.OUT),
+    dc=machine.Pin(34, machine.Pin.OUT),
+    backlight=machine.Pin(38, machine.Pin.OUT),
+    rotation=1,
+    color_order=st7789.BGR,
+    custom_framebufs =((0,0,240,35),(0,35,240,38),(0,73,240,39),(0,112,240,23))
+    ) # 	buf_idx: 0(status bar), 1(app icons), 2(app text), 3(scroll bar)
 
 
+
+# global vars for animation
+scroll_factor = 0.0
+
+prev_text_scroll_position = 0
+text_scroll_position = 0
+text_drawing = True
+
+prev_icon_scroll_position = 0
+icon_scroll_position = 0
+icon_drawing = True
+
+# control the show() commands
+buf_0_modified = True
+buf_1_modified = True
+buf_2_modified = True
+buf_3_modified = True
+
+# app selector
+app_selector_index = 0
+prev_selector_index = 0
+app_names = []
+app_paths = []
+
+clock_minute_drawn = -1
+
+gc.collect()
+from font import vga2_16x32 as font
+from launcher.icons import icons, battery
+from lib import keyboard
+import time, os
+gc.collect()
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Finding Apps ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-
-
-
 def scan_apps(sd):
     # first we need a list of apps located on the flash or SDCard
-
+    gc.collect()
     main_directory = os.listdir("/")
-    
     
     # if the sd card is not mounted, we need to mount it.
     if "sd" not in main_directory:
         try:
-            sd = SDCard(slot=2, sck=Pin(40), miso=Pin(39), mosi=Pin(14), cs=Pin(12))
+            sd = machine.SDCard(slot=2, sck=machine.Pin(40), miso=machine.Pin(39), mosi=machine.Pin(14), cs=machine.Pin(12))
         except OSError as e:
             print(e)
             print("SDCard couldn't be initialized. This might be because it was already initialized and not properly deinitialized.")
@@ -91,15 +133,16 @@ def scan_apps(sd):
                 sd.deinit()
             except:
                 print("Couldn't deinitialize SDCard")
-                
-        try:
-            os.mount(sd, '/sd')
-        except OSError as e:
-            print(e)
-            print("Could not mount SDCard.")
-        except NameError as e:
-            print(e)
-            print("SDCard not mounted")
+        
+        if sd != None: # error above can lead to none type here
+            try:
+                os.mount(sd, '/sd')
+            except OSError as e:
+                print(e)
+                print("Could not mount SDCard.")
+            except NameError as e:
+                print(e)
+                print("SDCard not mounted")
             
         main_directory = os.listdir("/")
 
@@ -117,8 +160,6 @@ def scan_apps(sd):
         os.mkdir("/sd/apps")
         sd_directory = os.listdir("/sd")
 
-
-
     # if everything above worked, sdcard should be mounted (if available), and both app directories should exist. now look inside to find our apps:
     main_app_list = os.listdir("/apps")
     sd_app_list = []
@@ -130,9 +171,6 @@ def scan_apps(sd):
             print(e)
             print("SDCard mounted but cant be opened; assuming it's been removed. Unmounting /sd.")
             os.umount('/sd')
-
-
-
 
     # now lets collect some separate app names and locations
     app_names = []
@@ -182,15 +220,8 @@ def scan_apps(sd):
     app_names.append("Settings")
     app_paths["Settings"] = "/launcher/settings.py"
     
-
-    
+    gc.collect()
     return app_names, app_paths, sd
-
-
-
-
-
-
 
 
 
@@ -223,13 +254,20 @@ def center_text_x(text, char_width = 16):
     return start_coord, str_width
 
 
-def easeInCubic(x):
-    return x * x * x
-
 def easeOutCubic(x):
     return 1 - ((1 - x) ** 3)
-        
-        
+
+def ease_in_out_cubic(x):
+    if x < 0.5:
+        return 4 * x * x * x
+    else:
+        return 1 - ((-2 * x + 2) ** 3) / 2
+
+def ease_in_out_quart(x):
+    if x < 0.5:
+        return 8 * x * x * x * x
+    else:
+        return 1 - ((-2 * x + 2) ** 4) / 2
 
 def time_24_to_12(hour_24,minute):
     ampm = 'am'
@@ -267,8 +305,128 @@ def read_battery_level(adc):
 
 
 
+# ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ GRAPHICS ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+def scroll_text():
+    """Handle scrolling animation for app text (buf_idx = 2)"""
+    global tft, scroll_factor, prev_text_scroll_position, text_scroll_position, text_drawing
+    global app_names, app_selector_index, prev_selector_index, config, appname_y
+    
+    if scroll_factor < 0: # handle negative numbers
+        text_ease_factor = -ease_in_out_quart( abs(scroll_factor * scroll_factor))
+    else:
+        text_ease_factor = ease_in_out_quart(scroll_factor * scroll_factor)
+        
+    # scroll text out of view using scroll method
+    text_scroll_position = int(text_ease_factor * 240)
+    tft.scroll(text_scroll_position - prev_text_scroll_position, 0, buf_idx=2)
+    
+    if abs(text_scroll_position) < 120:
+        #blackout the old text
+        if text_scroll_position == 0: # full blackout
+            tft.fill(config['bg_color'], buf_idx = 2)
+            
+        else: # partial blackout
+            blackout_width = (min(len(app_names[prev_selector_index]), 15)) * 16
+            tft.rect((120 - (blackout_width // 2)) + text_scroll_position, 80, blackout_width, 32, config['bg_color'], fill=True, buf_idx=2)
+            #also blackout right or left (depending on scroll direction) to prevent streaks
+            scroll_size = abs(text_scroll_position - prev_text_scroll_position)
+            if text_scroll_position > 0:
+                tft.rect(240 - (scroll_size), 80, scroll_size, 32, config['bg_color'], fill=True, buf_idx=2)
+            else:
+                tft.rect(0, 80, scroll_size, 32, config['bg_color'], fill=True, buf_idx=2)
+            
+        #crop text for display
+        current_app_text = app_names[app_selector_index]
+        if len(current_app_text) > 15:
+            current_app_text = current_app_text[:12] + "..."
 
+        #draw new text
+        tft.bitmap_text(font, current_app_text, center_text_x(current_app_text)[0] + text_scroll_position, 80, config['ui_color'], buf_idx=2)
+    tft.show(buf_idx=2)
+    
+    
+def scroll_icon():
+    """Handle scrolling animation for app icon (buf_idx = 1)"""
+    global tft, scroll_factor, prev_icon_scroll_position, icon_scroll_position, icon_drawing
+    global app_names, app_selector_index, config, app_paths
+    
+    if scroll_factor < 0: # handle negative numbers
+        icon_ease_factor = -ease_in_out_cubic( abs(scroll_factor * scroll_factor))
+    else:
+        icon_ease_factor = ease_in_out_cubic(scroll_factor * scroll_factor)
+    
+    # scroll text out of view using scroll method
+    icon_scroll_position = int(icon_ease_factor * 240)
+    tft.scroll(icon_scroll_position - prev_icon_scroll_position, 0, buf_idx=1)
+    
+    if 40 < abs(icon_scroll_position) < 80 or icon_scroll_position == 0:
+        # redraw icons
+        #blackout old icon
+        tft.fill(config['bg_color'], buf_idx=1)
+        
+        current_app_text = app_names[app_selector_index]
+        #special menu options for settings
+        if current_app_text == "UI Sound":
+            if config['ui_sound']:
+                tft.bitmap_text(font, "On", center_text_x("On")[0] + icon_scroll_position, 36, config['ui_color'], buf_idx=1)
+            else:
+                tft.bitmap_text(font, "Off", center_text_x("Off")[0] + icon_scroll_position, 36, config.palette[3], buf_idx=1)
+                
+        elif current_app_text == "Reload Apps":
+            tft.bitmap_icons(icons, icons.RELOAD, config['ui_color'],104 + icon_scroll_position, 36, buf_idx=1)
+            
+        elif current_app_text == "Settings":
+            tft.bitmap_icons(icons, icons.GEAR, config['ui_color'],104 + icon_scroll_position, 36, buf_idx=1)
+            
+        elif app_paths[app_names[app_selector_index]][:3] == "/sd":
+            tft.bitmap_icons(icons, icons.SDCARD, config['ui_color'],104 + icon_scroll_position, 36, buf_idx=1)
+        else:
+            tft.bitmap_icons(icons, icons.FLASH, config['ui_color'],104 + icon_scroll_position, 36, buf_idx=1)
+    tft.show(buf_idx=1)
 
+def draw_status_bar():
+    """Handle redrawing the status bar (buf_idx = 0)"""
+    global tft, buf_0_modified, config, batt
+    
+    tft.fill(config['bg_color'], buf_idx=0)
+    tft.fill_rect(0,0,240, 16, config.palette[2], buf_idx=0)
+    tft.hline(0,17,240, config.palette[0], buf_idx=0) # shadow
+    
+    #clock
+    _,_,_, hour_24, minute, _,_,_ = time.localtime()
+    formatted_time, ampm = time_24_to_12(hour_24, minute)
+    tft.text(formatted_time, 11,5,config.palette[0], buf_idx=0) # shadow
+    tft.text(formatted_time, 10,4,config['ui_color'], buf_idx=0)
+    tft.text(ampm, 11 + (len(formatted_time) * 8),5,config.palette[0], buf_idx=0) # shadow
+    tft.text(ampm, 10 + (len(formatted_time) * 8),4,config.palette[4], buf_idx=0)
+    
+    #battery
+    battlevel = read_battery_level(batt)
+    tft.bitmap_icons(battery, battery.FULL, config.extended_colors[0],209, 4, buf_idx=0) # shadow
+    if battlevel == 3:
+        tft.bitmap_icons(battery, battery.FULL, config.extended_colors[1],208, 3, buf_idx=0)
+    elif battlevel == 2:
+        tft.bitmap_icons(battery, battery.HIGH, config['ui_color'],208, 3, buf_idx=0)
+    elif battlevel == 1:
+        tft.bitmap_icons(battery, battery.LOW, config['ui_color'],208, 3, buf_idx=0)
+    else:
+        tft.bitmap_icons(battery, battery.EMPTY, config.extended_colors[0],208, 3, buf_idx=0)
+    tft.show(buf_idx=0)
+    buf_0_modified = True
+    
+def draw_scroll_bar():
+    """Handle redrawing the scroll bar (buf_idx = 3)"""
+    global tft, buf_3_modified, config, app_selector_index, app_names
+    
+    tft.fill(config['bg_color'], buf_idx=3)
+    
+    exact_scrollbar_width = 232 / len(app_names)
+    scrollbar_width = int(exact_scrollbar_width)
+    tft.rect(int(exact_scrollbar_width * app_selector_index) + 4,131,
+             scrollbar_width,4,config.palette[4], fill=True, buf_idx=3)
+    tft.rect(int(exact_scrollbar_width * app_selector_index) + 4,131,
+             scrollbar_width,4,config.palette[2], fill=False, buf_idx=3)
+    tft.show(buf_idx=3)
 
 #--------------------------------------------------------------------------------------------------
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -276,221 +434,152 @@ def read_battery_level(adc):
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 #--------------------------------------------------------------------------------------------------
 
-
-
-
 def main_loop():
+    global scroll_factor, prev_text_scroll_position, text_scroll_position, text_drawing, prev_icon_scroll_position
+    global icon_scroll_position, icon_drawing, buf_0_modified, buf_1_modified, buf_2_modified, buf_3_modified
+    global app_selector_index, prev_selector_index, app_names, app_paths, clock_minute_drawn, batt
+    
     
     #bump up our clock speed so the UI feels smoother (240mhz is the max officially supported, but the default is 160mhz)
     machine.freq(240_000_000)
     
-    
-    # load our config asap to support other processes
-    config_modified = False
-    #load config
-    try:
-        with open("config.json", "r") as conf:
-            config = json.loads(conf.read())
-            ui_color = config["ui_color"]
-            bg_color = config["bg_color"]
-            ui_sound = config["ui_sound"]
-            volume = config["volume"]
-            wifi_ssid = config["wifi_ssid"]
-            wifi_pass = config["wifi_pass"]
-            sync_clock = config["sync_clock"]
-            timezone = config["timezone"]
-    except:
-        print("could not load settings from config.json. reloading default values.")
-        config_modified = True
-        ui_color = default_ui_color
-        bg_color = default_bg_color
-        ui_sound = default_ui_sound
-        volume = default_volume
-        wifi_ssid = ''
-        wifi_pass = ''
-        sync_clock = True
-        timezone = 0
-        with open("config.json", "w") as conf:
-            config = {"ui_color":ui_color, "bg_color":bg_color, "ui_sound":ui_sound, "volume":volume, "wifi_ssid":'', "wifi_pass":'', 'sync_clock':True, 'timezone':0}
-            conf.write(json.dumps(config))
         
     # sync our RTC on boot, if set in settings
-    syncing_clock = sync_clock
+    syncing_clock = config['sync_clock']
     sync_ntp_attemps = 0
     connect_wifi_attemps = 0
     rtc = machine.RTC()
     
-    #wifi loves to give unknown runtime errors, just try it twice:
-    nic = None
-    try:
-        nic = network.WLAN(network.STA_IF)
-    except RuntimeError as e:
-        print(e)
-        try:
-            nic = network.WLAN(network.STA_IF)
-        except RuntimeError as e:
-            print("Wifi WLAN object couldnt be created. Gave this error:",e)
-            import micropython
-            print(micropython.mem_info(),micropython.qstr_info())
-        
-    if wifi_ssid == '':
+
+    if config['wifi_ssid'] == '':
         syncing_clock = False # no point in wasting resources if wifi hasn't been setup
     elif rtc.datetime()[0] != 2000: #clock wasn't reset, assume that time has already been set
         syncing_clock = False
         
-    if syncing_clock: #enable wifi if we are syncing the clock
+    if syncing_clock and nic != None: #enable wifi if we are syncing the clock
         if not nic.active(): # turn on wifi if it isn't already
             nic.active(True)
         if not nic.isconnected(): # try connecting
             try:
-                nic.connect(wifi_ssid, wifi_pass)
+                nic.connect(config['wifi_ssid'], config['wifi_pass'])
             except OSError as e:
                 print("wifi_sync_rtc had this error when connecting:",e)
     
     #before anything else, we should scan for apps
     sd = None #dummy var for when we cant mount SDCard
     app_names, app_paths, sd = scan_apps(sd)
+    
     app_selector_index = 0
     prev_selector_index = 0
     
-    
     #init the keyboard
     kb = keyboard.KeyBoard()
-    pressed_keys = []
-    prev_pressed_keys = []
     
     #init the ADC for the battery
-    batt = ADC(10)
-    batt.atten(ADC.ATTN_11DB)
+    batt = machine.ADC(10)
+    batt.atten(machine.ADC.ATTN_11DB)
+
     
-    #init driver for the graphics
-    spi = SPI(1, baudrate=40000000, sck=Pin(36), mosi=Pin(35), miso=None)
-    tft = st7789.ST7789(
-    spi,
-    display_height,
-    display_width,
-    reset=Pin(33, Pin.OUT),
-    cs=Pin(37, Pin.OUT),
-    dc=Pin(34, Pin.OUT),
-    backlight=Pin(38, Pin.OUT),
-    rotation=1,
-    color_order=st7789.BGR
-    )
-    
-    tft.vscrdef(40,display_width,40)
-    tft.vscsad(target_vscsad)
-        
-    mid_color = mh.mix_color565(bg_color, ui_color)
-    red_color = mh.color565_shiftred(ui_color)
-    green_color = mh.color565_shiftgreen(ui_color,0.4)
-    
-    nonscroll_elements_displayed = False
+    #nonscroll_elements_displayed = False
     
     force_redraw_display = True
     
     #this is used as a flag to tell a future loop to redraw the frame mid-scroll animation
     delayed_redraw = False
     
-    launching = False
-    current_vscsad = 40
-    
-    scroll_direction = 0 #1 for right, -1 for left, 0 for center
-    refresh_timer = 0
-    
-    #init the beeper!
-    beep = beeper.Beeper()
-    
     #starupp sound
-    if ui_sound:
+    if config['ui_sound']:
         beep.play(('C3',
                    ('F3'),
                    ('A3'),
                    ('F3','A3','C3'),
-                   ('F3','A3','C3')),130,volume)
+                   ('F3','A3','C3')),130,config['volume'])
         
         
-    #init diplsay
-    tft.fill_rect(-40,0,280, display_height, bg_color)
-    tft.fill_rect(-40,0,280, 18, mid_color)
+    # init diplsay
+    # icons
+    tft.fill(config['bg_color'], buf_idx=1)
+    tft.show(buf_idx=1)
+    # text
+    tft.fill(config['bg_color'], buf_idx=2)
+    tft.show(buf_idx=2)
+    # scroll bar
+    tft.fill(config['bg_color'], buf_idx=3)
+    tft.show(buf_idx=3)
     
+    loop_timer = 0
     
     while True:
-        
-        
         # ----------------------- check for key presses on the keyboard. Only if they weren't already pressed. --------------------------
-        pressed_keys = kb.get_pressed_keys()
-        if pressed_keys != prev_pressed_keys:
+        new_keys = kb.get_new_keys()
+        if new_keys:
             
             # ~~~~~~ check if the arrow keys are newly pressed ~~~~~
-            if "/" in pressed_keys and "/" not in prev_pressed_keys: # right arrow
+            if "/" in new_keys: # right arrow
                 app_selector_index += 1
                 
                 #animation:
-
-                scroll_direction = 1
-                current_vscsad = target_vscsad
-                if ui_sound:
-                    beep.play((("C5","D4"),"A4"), 80, volume)
+                scroll_factor = 1.0
+                text_drawing = True
+                icon_drawing = True
+                prev_text_scroll_position = 240
+                text_scroll_position = 240
+                prev_icon_scroll_position = 240
+                icon_scroll_position = 240
+                
+                if config['ui_sound']:
+                    beep.play((("C5","D4"),"A4"), 80, config['volume'])
 
                 
-            elif "," in pressed_keys and "," not in prev_pressed_keys: # left arrow
+            elif "," in new_keys: # left arrow
                 app_selector_index -= 1
                 
                 #animation:
                 
-                scroll_direction = -1
+                #scroll_direction = -1
+                scroll_factor = -1.0
+                text_drawing = True
+                icon_drawing = True
+                prev_text_scroll_position = -240
+                text_scroll_position = -240
+                prev_icon_scroll_position = -240
+                icon_scroll_position = -240
                 
-                #this prevents multiple scrolls from messing up the animation
-                current_vscsad = target_vscsad
-                
-                if ui_sound:
-                    beep.play((("B3","C5"),"A4"), 80, volume)
+                if config['ui_sound']:
+                    beep.play((("B3","C5"),"A4"), 80, config['volume'])
                 
             
         
             # ~~~~~~~~~~ check if GO or ENTER are pressed ~~~~~~~~~~
-            if "GO" in pressed_keys or "ENT" in pressed_keys:
+            if "GO" in new_keys or "ENT" in new_keys:
                 
                 # special "settings" app options will have their own behaviour, otherwise launch the app
                 if app_names[app_selector_index] == "UI Sound":
                     
-                    if ui_sound == 0: # currently muted, then unmute
-                        ui_sound = True
+                    if config['ui_sound'] == 0: # currently muted, then unmute
+                        config['ui_sound'] = True
                         force_redraw_display = True
-                        beep.play(("C4","G4","G4"), 100, volume)
-                        config_modified = True
+                        beep.play(("C4","G4","G4"), 100, config['volume'])
                     else: # currently unmuted, then mute
-                        ui_sound = False
+                        config['ui_sound'] = False
                         force_redraw_display = True
-                        config_modified = True
                 
                 elif app_names[app_selector_index] == "Reload Apps":
                     app_names, app_paths, sd = scan_apps(sd)
                     app_selector_index = 0
                     current_vscsad = 42 # forces scroll animation triggers
-                    if ui_sound:
-                        beep.play(('F3','A3','C3'),100,volume)
+                    if config['ui_sound']:
+                        beep.play(('F3','A3','C3'),100,config['volume'])
                         
                 else: # ~~~~~~~~~~~~~~~~~~~ LAUNCH THE APP! ~~~~~~~~~~~~~~~~~~~~
                     
                     #save config if it has been changed:
-                    if config_modified:
-                        with open("config.json", "w") as conf:
-                            config = {
-                            "ui_color":ui_color,
-                            "bg_color":bg_color,
-                            "ui_sound":ui_sound,
-                            "volume":volume,
-                            "wifi_ssid":wifi_ssid,
-                            "wifi_pass":wifi_pass,
-                            "sync_clock":sync_clock,
-                            "timezone":timezone}
-                            conf.write(json.dumps(config))
-                        
+                    config.save()
+                    
                     # shut off the display
-                    tft.fill(black)
+                    tft.fill(0)
                     tft.sleep_mode(True)
-                    Pin(38, Pin.OUT).value(0) #backlight off
+                    machine.Pin(38, machine.Pin.OUT).value(0) #backlight off
                     spi.deinit()
                     
                     if sd != None:
@@ -499,178 +588,96 @@ def main_loop():
                         except:
                             print("Tried to deinit SDCard, but failed.")
                             
-                    if ui_sound:
-                        beep.play(('C4','B4','C5','C5'),100,volume)
+                    if config['ui_sound']:
+                        beep.play(('C4','B4','C5','C5'),100,config['volume'])
                         
                     launch_app(app_paths[app_names[app_selector_index]])
 
             else: # keyboard shortcuts!
-                for key in pressed_keys:
+                for key in new_keys:
                     # jump to letter:
-                    if key not in prev_pressed_keys and len(key) == 1: # filter special keys and repeated presses
+                    if len(key) == 1: # filter special keys and repeated presses
                         if key in 'abcdefghijklmnopqrstuvwxyz1234567890':
                             #search for that letter in the app list
                             for idx, name in enumerate(app_names):
                                 if name.lower().startswith(key):
                                     #animation:
                                     if app_selector_index > idx:
-                                        scroll_direction = -1
+                                        #scroll_direction = -1
+                                        scroll_factor = -1.0
+                                        text_drawing = True
+                                        icon_drawing = True
+                                        prev_text_scroll_position = -240
+                                        text_scroll_position = -240
+                                        prev_icon_scroll_position = -240
+                                        icon_scroll_position = -240
+                                        
                                     elif app_selector_index < idx:
-                                        scroll_direction = 1
-                                    current_vscsad = target_vscsad
+                                        scroll_factor = 1.0
+                                        text_drawing = True
+                                        icon_drawing = True
+                                        prev_text_scroll_position = 240
+                                        text_scroll_position = 240
+                                        prev_icon_scroll_position = 240
+                                        icon_scroll_position = 240
+                                        #scroll_direction = 1
+                                    #current_vscsad = target_vscsad
                                     # go there!
                                     app_selector_index = idx
-                                    if ui_sound:
-                                        beep.play(("G3"), 100, volume)
+                                    if config['ui_sound']:
+                                        beep.play(("G3"), 100, config['volume'])
                                     found_key = True
                                     break
-                
-            # once we parse the keypresses for this loop, we need to store them for next loop
-            prev_pressed_keys = pressed_keys
-        
-        
         
         
         #wrap around our selector index, in case we go over or under the target amount
         app_selector_index = app_selector_index % len(app_names)
     
     
-        time.sleep_ms(4) #this loop runs about 3000 times a second without sleeps. The sleeps actually help things feel smoother.
+        time.sleep_ms(1)
         
         
     #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Main Graphics: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
     #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-
-        #decide now if we will be redrawing the text.
-        # we are capturing this so that we can black out and redraw the screen in two parts
-        if (app_selector_index != prev_selector_index):
-            delayed_redraw = True
         
         
-        prev_app_text = app_names[prev_selector_index]
-        current_app_text = app_names[app_selector_index]
-        
-        
-        
-        
-        # if scrolling animation, move in the direction specified!
-        if scroll_direction != 0:
-            tft.vscsad(current_vscsad % 240)
-            if scroll_direction == 1:
-                current_vscsad += math.floor(easeOutCubic((current_vscsad - 40) / 120) * 10) + 5
-                if current_vscsad >= 160:
-                    current_vscsad = -80
-                    scroll_direction = 0
+        # handle scroll_factor
+        if scroll_factor != 0:
+            if scroll_factor > 0:
+                scroll_factor -= min(0.1, abs(scroll_factor))
             else:
-                current_vscsad -= math.floor(easeOutCubic((current_vscsad - 40) / -120) * 10) + 5
-                if current_vscsad <= -80:
-                    current_vscsad = 160
-                    scroll_direction = 0
-
+                scroll_factor += min(0.1, abs(scroll_factor))
+        
+        if text_drawing:
+            scroll_text()
+            if text_scroll_position == 0:
+                text_drawing = False
+            
+        if icon_drawing:
+            scroll_icon()
+            if icon_scroll_position == 0:
+                icon_drawing = False
                 
-        # if vscsad/scrolling is not centered, move it toward center!
-        if scroll_direction == 0 and current_vscsad != target_vscsad:
-            tft.vscsad(current_vscsad % 240)
-            if current_vscsad < target_vscsad:
+        if time.localtime()[4] != clock_minute_drawn:
+            clock_minute_drawn = time.localtime()[4]
+            draw_status_bar()
+            
+        if app_selector_index != prev_selector_index:
+            draw_scroll_bar()
 
-                current_vscsad += (abs(current_vscsad - target_vscsad) // 8) + 1
-            elif current_vscsad > target_vscsad:
-                current_vscsad -= (abs(current_vscsad - target_vscsad) // 8) + 1
-
-        
-        
-        # if we are scrolling, we should change some UI elements until we finish
-        if nonscroll_elements_displayed and (current_vscsad != target_vscsad):
-            tft.fill_rect(0,133,240,2,bg_color) # erase scrollbar
-            tft.fill_rect(6,2,58,16,mid_color) # erase clock
-            tft.fill_rect(212,4,20,10,mid_color) # erase battery
-            nonscroll_elements_displayed = False
-            
-            
-        elif nonscroll_elements_displayed == False and (current_vscsad == target_vscsad):
-            #scroll bar
-            scrollbar_width = 240 // len(app_names)
-            tft.fill_rect((scrollbar_width * app_selector_index),133,scrollbar_width,2,mid_color)
-            
-            #clock
-            _,_,_, hour_24, minute, _,_,_ = time.localtime()
-            formatted_time, ampm = time_24_to_12(hour_24, minute)
-            tft.text(fontsmall, formatted_time, 6,2,ui_color, mid_color)
-            tft.text(fontsmall, ampm, 8 + (len(formatted_time) * 8),2,bg_color, mid_color)
-            
-            #battery
-            battlevel = read_battery_level(batt)
-            if battlevel == 3:
-                tft.bitmap_icons(battery, battery.FULL, (mid_color,green_color),212, 4)
-            elif battlevel == 2:
-                tft.bitmap_icons(battery, battery.HIGH, (mid_color,ui_color),212, 4)
-            elif battlevel == 1:
-                tft.bitmap_icons(battery, battery.LOW, (mid_color,ui_color),212, 4)
-            else:
-                tft.bitmap_icons(battery, battery.EMPTY, (mid_color,red_color),212, 4)
-            
-            nonscroll_elements_displayed = True
-            
-        
-        #refresh the text mid-scroll, or when forced
-        if (delayed_redraw and scroll_direction == 0 ) or force_redraw_display:
-            #delayed_redraw = False
-            refresh_timer += 1
-            
-            if refresh_timer == 1 or force_redraw_display: # redraw text
-                #crop text for display
-                if len(prev_app_text) > 15:
-                    prev_app_text = prev_app_text[:12] + "..."
-                if len(current_app_text) > 15:
-                    current_app_text = current_app_text[:12] + "..."
-                
-                #blackout the old text
-                tft.fill_rect(-40, appname_y, 280, 32, bg_color)
-            
-                #draw new text
-                tft.text(font, current_app_text, center_text_x(current_app_text)[0], appname_y, ui_color, bg_color)
-            
-            if refresh_timer == 2 or force_redraw_display: # redraw icon
-                refresh_timer = 0
-                delayed_redraw = False
-                
-                #blackout old icon #TODO: delete this step when all text is replaced by icons
-                tft.fill_rect(96, 30, 48, 36, bg_color)
-                
-                #special menu options for settings
-                if current_app_text == "UI Sound":
-                    if ui_sound:
-                        tft.text(font, "On", center_text_x("On")[0], 36, ui_color, bg_color)
-                    else:
-                        tft.text(font, "Off", center_text_x("Off")[0], 36, mid_color, bg_color)
-                        
-                elif current_app_text == "Reload Apps":
-                    tft.bitmap_icons(icons, icons.RELOAD, (bg_color,ui_color),104, 36)
-                    
-                elif current_app_text == "Settings":
-                    tft.bitmap_icons(icons, icons.GEAR, (bg_color,ui_color),104, 36)
-                    
-                elif app_paths[app_names[app_selector_index]][:3] == "/sd":
-                    tft.bitmap_icons(icons, icons.SDCARD, (bg_color,ui_color),104, 36)
-                else:
-                    tft.bitmap_icons(icons, icons.FLASH, (bg_color,ui_color),104, 36)
-            
-
-        
-            
-        
-        #reset vars for next loop
+        # reset vars for next loop
         force_redraw_display = False
-        
-        #update prev app selector index to current one for next cycle
         prev_selector_index = app_selector_index
-            
+        prev_text_scroll_position = text_scroll_position
+        prev_icon_scroll_position = icon_scroll_position
+        loop_timer = (loop_timer + 1) % 10
+        
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ WIFI and RTC: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
         
-        if syncing_clock:
+        if syncing_clock and nic != None:
             if nic.isconnected():
                 try:
                     ntptime.settime()
@@ -683,7 +690,7 @@ def main_loop():
                     syncing_clock = False
                     #apply our timezone offset
                     time_list = list(rtc.datetime())
-                    time_list[4] = time_list[4] + timezone
+                    time_list[4] = time_list[4] + config['timezone']
                     rtc.datetime(tuple(time_list))
                     print(f'RTC successfully synced to {rtc.datetime()} with {sync_ntp_attemps} attemps.')
                     

@@ -1,18 +1,4 @@
-from machine import I2S, Pin
-import math
-
-fast_sin_len = const(320)
-fast_sin_hz = const(25)
-SCK_PIN = const(41)
-WS_PIN = const(43)
-SD_PIN = const(42)
-I2S_ID = const(1)
-BUFFER_LENGTH_IN_BYTES = const(2100)
-SAMPLE_SIZE_IN_BITS = const(16)
-FORMAT = I2S.STEREO
-SAMPLE_RATE_IN_HZ = const(16000)
-
-volume_map = {0:1,1:4,2:10,3:16,4:20,5:28,6:36,7:50,8:60,9:80,10:127}
+volume_map = (1,4,10,16,20,28,36,50,60,80,127)
 tone_map = {
 "C3": 131,
 "CS3": 139,
@@ -53,18 +39,18 @@ tone_map = {
 }
 
 class Beeper:
-    def __init__(self, buf_size=4000):
-        
-        self._output = I2S(            
-            I2S_ID,
-            sck=Pin(SCK_PIN),
-            ws=Pin(WS_PIN),
-            sd=Pin(SD_PIN),
-            mode=I2S.TX,
-            bits=SAMPLE_SIZE_IN_BITS,
-            format=FORMAT,
-            rate=SAMPLE_RATE_IN_HZ,
-            ibuf=BUFFER_LENGTH_IN_BYTES)
+    def __init__(self, buf_size=3000):
+        import machine
+        self._output = machine.I2S(            
+            1,
+            sck=machine.Pin(41),
+            ws=machine.Pin(43),
+            sd=machine.Pin(42),
+            mode=machine.I2S.TX,
+            bits=16,
+            format=machine.I2S.STEREO,
+            rate=16000,
+            ibuf=2100)
         
         self._current_notes = []
 
@@ -77,7 +63,7 @@ class Beeper:
         self._output.deinit()
         
         
-    #@micropython.viper #viper HATES my esp32-s3 :(
+    @micropython.viper #viper HATES my esp32-s3 :(
     # it works when uncompiled. But compiled, it deep-fries all the audio. 
     def gen_square_wave(self, frequency:int, time_ms:int, high_sample:int) -> int:
         """
@@ -130,7 +116,7 @@ class Beeper:
     
     
     
-    #@micropython.viper
+    @micropython.viper
     def double_square_wave(self, frequency1:int, frequency2:int, time_ms:int, high_sample:int) -> int:
         """
         This is the same as self.gen_square_wave, except it has been refactored to play two frequencies together.
@@ -199,12 +185,9 @@ class Beeper:
             self._buf[written_bytes] = this_sample
             written_bytes += 1
 
-            
-
-        
         return written_bytes
 
-    #@micropython.viper
+    @micropython.viper
     def triple_square_wave(self, frequency1:int, frequency2:int, frequency3:int, time_ms:int, high_sample:int) -> int:
         """
         This is the same as self.gen_square_wave/self.double_square_wave,
@@ -291,34 +274,6 @@ class Beeper:
             written_bytes += 1
 
         return written_bytes
-    
-    
-    
-    def play_chorus(self, note, time_ms, volume):
-        """
-        Play a single note in multiple octaves. This method is probably not as useful as the regular self.play method.
-        """
-        freq = tone_map[note]
-        
-        #find note2
-        note_octave = int(note[-1])
-        note_without_octave = note[:-1]
-        note2 = note_without_octave + str(note_octave - 1)
-        if note2 in tone_map.keys():
-            freq2 = tone_map[note2]
-        else:
-            freq2 = freq - 1
-
-        high_sample = volume_map[volume]
-
-        while time_ms * 32 > self.buf_size:
-            time_ms -= self.buf_size // 32
-            written_samples = self.double_square_wave(freq, freq2, self.buf_size // 32, high_sample)
-            self._output.write(self._mv[0:written_samples])
-
-        written_samples = self.double_square_wave(freq, freq2, time_ms, high_sample)
-        self._output.write(self._mv[0:written_samples])
-        
         
     def play_freq(self, freq, time_ms, volume):
         """Simply play the given frequency"""
@@ -397,7 +352,6 @@ class Beeper:
 if __name__ == "__main__":
     import time
     beep = Beeper()
-    #beep.play_chorus('C4',200,10)
     beep.play((
         ('G3'),
         ('G3','C3'),
