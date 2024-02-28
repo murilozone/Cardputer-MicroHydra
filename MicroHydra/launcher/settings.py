@@ -1,6 +1,7 @@
 from machine import Pin, SPI
 import machine
 import time, os, json, math
+import network
 from lib import keyboard, beeper
 from lib import st7789py as st7789
 from lib import microhydra as mh
@@ -33,6 +34,8 @@ default_volume = const(2)
 
 display_width = const(240)
 display_height = const(135)
+
+wlan_sta = network.WLAN(network.STA_IF)
 
 #~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~ Define Settings: ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -437,6 +440,76 @@ def get_bool(tft, font, kb, beep, setting_name, previous_val, ui_color, bg_color
 
         prev_pressed_keys = pressed_keys
         
+        
+def get_list(tft, font, kb, beep, setting_name, previous_val, ui_color, bg_color, ui_sound, volume, list): # ~~~~~~~~~~~~~~~~~~~~~~~ get_list ~~~~~~~~~~~~~~~~~~~~~~~~~
+    
+    current_value = 0
+    
+    # draw pop-up menu box
+    tft.fill_rect(10,10,220,115,bg_color)
+    tft.rect(9,9,222,117,ui_color)
+    tft.hline(10,126,222,black)
+    tft.hline(11,127,222,black)
+    tft.hline(12,128,222,black)
+    tft.hline(13,129,222,black)
+    tft.vline(231,10,117,black)
+    tft.vline(232,11,117,black)
+    tft.vline(233,12,117,black)
+    tft.vline(234,13,117,black)
+    
+    # arrows
+    for i in range(0,8):
+        tft.hline(
+            x = (119 - i),
+            y = 60 + i,
+            length = 2 + (i*2),
+            color = ui_color)
+        tft.hline(
+            x = (119 - i),
+            y = 116 - i,
+            length = 2 + (i*2),
+            color = ui_color)
+    
+    tft.text(font, setting_name, 120 - ((len(setting_name)* 16) // 2), 20, ui_color, bg_color)
+    
+    pressed_keys = []
+    prev_pressed_keys = kb.get_pressed_keys()
+    
+    redraw = True
+    
+    while True:
+        pressed_keys = kb.get_pressed_keys()
+        if pressed_keys != prev_pressed_keys:
+            if ";" in pressed_keys and ";" not in prev_pressed_keys: # up arrow
+                current_value += 1
+                if current_value > (len(list) - 1):
+                    current_value = (len(list) - 1)
+                if ui_sound:
+                    beep.play("D3", 140, volume)
+                    redraw = True
+            elif "." in pressed_keys and "." not in prev_pressed_keys: # down arrow
+                current_value -= 1
+                if current_value < 0:
+                    current_value = 0
+                if ui_sound:
+                    beep.play("D3", 140, volume)
+                    redraw = True
+            elif ("GO" in pressed_keys and "GO" not in prev_pressed_keys) or ("ENT" in pressed_keys and "ENT" not in prev_pressed_keys): # confirm settings
+                if ui_sound:
+                    beep.play(("C4","D4","E4"), 50, volume)
+                return list[current_value]
+            elif "`" in pressed_keys and "`" not in prev_pressed_keys:
+                if ui_sound:
+                    beep.play(("E4","D4","C4"), 50, volume)
+                return previous_val
+            
+        # graphics!
+        if redraw:
+            tft.fill_rect(62, 75, 128, 32, bg_color)
+            tft.text(fontsmall, list[current_value], 104, 75, ui_color, bg_color)
+            redraw = False
+        prev_pressed_keys = pressed_keys
+        
 
 def get_int(tft, font, kb, beep, setting_name, previous_val, minimum, maximum, ui_color, bg_color, ui_sound, volume): # ~~~~~~~~~~~~~~~~~~~~~~~ get_int ~~~~~~~~~~~~~~~~~~~~~~~~~
     
@@ -536,8 +609,6 @@ def main_loop():
     kb = keyboard.KeyBoard()
     pressed_keys = []
     prev_pressed_keys = []
-    
-    
     
     
     #init driver for the graphics
@@ -651,7 +722,10 @@ def main_loop():
                     pressed_keys = kb.get_pressed_keys()
                     
                 elif setting_names[cursor_index] == 'wifi_ssid':
-                    wifi_ssid = get_text(tft, font, kb, beep, 'wifi_ssid:', wifi_ssid, ui_color, bg_color, ui_sound, volume)
+                    #scan ssid wifi
+                    wlan_sta.active(True)
+                    ssids = sorted(ssid.decode('utf-8') for ssid, *_ in wlan_sta.scan())
+                    wifi_ssid = get_list(tft, font, kb, beep, 'wifi_ssid:', wifi_ssid, ui_color, bg_color, ui_sound, volume, ssids)
                     config["wifi_ssid"] = wifi_ssid
                     force_redraw_display = True
                     pressed_keys = kb.get_pressed_keys()
